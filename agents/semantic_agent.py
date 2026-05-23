@@ -1,4 +1,4 @@
-"""semantic_agent — vector similarity search over Hetionet node embeddings."""
+"""semantic_agent — vector similarity search over Hetionet node and chunk embeddings."""
 import os
 from dotenv import load_dotenv
 
@@ -6,33 +6,37 @@ load_dotenv()
 
 from google.adk.agents import Agent
 from retrieval.search_and_rerank import search_and_rerank
+from tools.neo4j_tools import search_chunks
 
 semantic_agent = Agent(
     name="semantic_agent",
     model=os.environ["GOOGLE_ADK_MODEL"],
     output_key="semantic_results",
     description=(
-        "Finds biomedical entities by semantic similarity using Neo4j vector search + 3-stage "
-        "reranking (BM25 -> Semantic -> CrossEncoder). Use when the user's query contains "
-        "approximate or descriptive terms — e.g. 'anti-inflammatory drug' instead of 'Ibuprofen'."
+        "Finds biomedical entities and research paper passages by semantic similarity. "
+        "Uses 3-stage reranking (BM25 -> Semantic -> CrossEncoder) over Hetionet node "
+        "embeddings and PubMed chunk embeddings. Use when the query uses approximate or "
+        "descriptive terms — e.g. 'anti-inflammatory drug' instead of 'Ibuprofen'."
     ),
     instruction=(
-        "You perform semantic similarity search over the Hetionet biomedical knowledge graph "
-        "using pre-computed all-mpnet-base-v2 vectors stored in a Neo4j vector index.\n\n"
-        "Tool available:\n"
-        "- search_and_rerank(query, top_k): retrieves top-50 candidates by vector similarity, "
-        "  then reranks through BM25 -> Semantic cosine -> CrossEncoder. Returns up to top_k "
-        "  results. Each result has: identifier, kind, name, score, text, cross_encoder_score.\n\n"
-        "When to use:\n"
-        "- The user describes a concept (e.g. 'drugs for inflammation') rather than an exact name\n"
-        "- Exact Cypher lookups return 0 results (possible name mismatch)\n"
-        "- The user asks 'what is similar to X' or 'find entities related to Y'\n\n"
+        "You perform semantic similarity search over two indexes:\n"
+        "1. Hetionet graph nodes (Disease, Compound, Gene, etc.) — for entity disambiguation.\n"
+        "2. PubMed paper chunks (Chunk nodes) — for evidence from literature.\n\n"
+        "Tools available:\n"
+        "- search_and_rerank(query, top_k): searches Hetionet node embeddings, reranks "
+        "  through BM25 -> Semantic cosine -> CrossEncoder. Returns results with: "
+        "  identifier, kind, name, score, cross_encoder_score.\n"
+        "- search_chunks(query, top_k): searches PubMed Chunk nodes by vector similarity. "
+        "  Returns results with: chunk_id, text, pmid, title, source, score.\n\n"
+        "When to use each tool:\n"
+        "- search_and_rerank: entity disambiguation, 'what is X', 'find drugs for Y'\n"
+        "- search_chunks: 'what does the literature say about X', 'recent research on Y'\n\n"
         "Workflow:\n"
-        "1. Call search_and_rerank with the user's query or a refined version of it.\n"
-        "2. Report the top results (identifier, kind, name, cross_encoder_score).\n"
-        "3. Suggest which exact names from the results could be used in follow-up Cypher queries.\n\n"
-        "Do NOT attempt to traverse the graph or answer multi-hop questions — "
-        "pass those to cypher_agent. Your role is entity discovery and name disambiguation."
+        "1. Call search_and_rerank for entity-level results.\n"
+        "2. Optionally call search_chunks if literature evidence is relevant.\n"
+        "3. Report top results and suggest exact names for follow-up Cypher queries.\n\n"
+        "Do NOT traverse the graph or answer multi-hop questions — "
+        "pass those to cypher_agent. Your role is entity discovery and literature lookup."
     ),
-    tools=[search_and_rerank],
+    tools=[search_and_rerank, search_chunks],
 )

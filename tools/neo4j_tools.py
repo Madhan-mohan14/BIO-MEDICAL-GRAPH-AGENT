@@ -270,3 +270,36 @@ def get_schema_relationship_types() -> list[str]:
     """Return all relationship types in the Hetionet graph."""
     query = "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY relationshipType"
     return [r["relationshipType"] for r in _run_cypher_params(query, {})]
+
+
+def search_chunks(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+    """Search PubMed paper chunks by text substring match.
+
+    Returns Chunk nodes ingested by ingestion/ingest_papers.py that contain
+    the query terms, along with their source paper metadata.
+
+    Note: This is a text-based fallback. For vector similarity search over
+    chunks, the chunk vector index must be set up separately (see ingestion/).
+
+    Args:
+        query: Natural-language query string.
+        top_k: Maximum number of chunk results to return.
+
+    Returns:
+        List of dicts with keys: chunk_id, text, pmid, title, source.
+        Returns empty list if no Chunk nodes exist yet (run ingestion first).
+    """
+    words = query.lower().split()
+    if not words:
+        return []
+
+    # Match chunks containing any query word in their text
+    search_term = words[0]
+    cypher = (
+        "MATCH (c:Chunk) "
+        "WHERE toLower(c.text) CONTAINS $term "
+        "RETURN c.id AS chunk_id, c.text AS text, "
+        "       c.pmid AS pmid, c.title AS title, c.source AS source "
+        f"LIMIT {top_k}"
+    )
+    return _run_cypher_params(cypher, {"term": search_term})
