@@ -4,49 +4,62 @@ A multi-agent biomedical question-answering system built on Google ADK, Neo4j (H
 
 Ask questions like *"What diseases does Ibuprofen treat?"* or *"What genes does Metformin bind?"* or *"Find drug repurposing candidates for type 2 diabetes"* — the system queries a 47,000-node knowledge graph, runs 3-stage semantic reranking, supplements with live web search, and synthesizes a grounded answer with faithfulness scoring and a human-in-the-loop confidence gate.
 
+## Why Graph RAG — not plain RAG?
+
+Naive RAG (embed docs → vector search → LLM) breaks down on relational biomedical questions:
+
+> *"Which compounds treat diseases that share genes with rheumatoid arthritis?"*
+
+A vector search returns semantically similar text chunks — but it has no concept of a typed 3-hop graph path. It can't traverse `Disease → Gene → Disease → Compound` and reason over the structure. It just returns whatever embedding is closest, which for a multi-hop question is usually the wrong thing.
+
+Graph RAG adds **Cypher traversal** on top of vector search. The knowledge graph stores explicit, typed, expert-curated relationships. Multi-hop reasoning becomes a deterministic graph query rather than a probabilistic guess. The LLM's role shifts from "figure out the relationship" to "explain what the graph already knows".
+
+In this project both run in parallel — Cypher for structural facts, vector search for fuzzy entity matching — and a synthesis agent merges them with a confidence score and a human review gate.
+
+## Dataset — Hetionet v1.0
+
+Built on [Hetionet](https://github.com/hetio/hetionet) — the only fully open-access, expert-curated biomedical knowledge graph integrating 29 public databases (DrugBank, OMIM, UniProt, GO, and more).
+
+| Metric | Value |
+|---|---|
+| Total nodes | 47,031 |
+| Node types | 11 (Disease, Compound, Gene, Anatomy, Side Effect, Symptom, Biological Process, Cellular Component, Molecular Function, Pathway, Pharmacologic Class) |
+| Total relationships (original) | 2,250,197 across 24 types |
+| Loaded into AuraDB Free | 388,154 across 11 types |
+| Excluded (hit AuraDB Free 400K cap) | EXPRESSES, PARTICIPATES, REGULATES, UPREGULATES, DOWNREGULATES |
+| Node embeddings | 768-dim all-mpnet-base-v2 stored in Neo4j vector index |
+
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    React UI (frontend/)                      │
-│              3D force graph  +  HITL review panel           │
-└───────────────┬──────────────────────────────────────────────┘
-                │ SSE /query/stream  │  WS /ws/{user_id}  │  REST
-┌───────────────▼──────────────────────────────────────────────┐
-│              FastAPI  (api/main.py)                          │
-│   /query/stream → SSE events: agent, delta, hitl, done       │
-│   /approve-edge → HITL write gate                            │
-│   /feedback     → thumbs up/down store                       │
-└───────────────┬──────────────────────────────────────────────┘
-                │ ADK Runner
-┌───────────────▼──────────────────────────────────────────────┐
-│         SequentialAgent — orchestrator                       │
-│                                                              │
-│   ┌─────────────── ParallelAgent ────────────────────────┐   │
-│   │                                                      │   │
-│   │  cypher_agent          semantic_agent   web_agent    │   │
-│   │  (14 Cypher tools)    (3-stage rerank)  (Google)     │   │
-│   │  output_key=           output_key=      output_key=  │   │
-│   │  cypher_results        semantic_results web_results  │   │
-│   └──────────────────────────────────────────────────────┘   │
-│                            │                                 │
-│   ┌────────────────────────▼─────────────────────────────┐   │
-│   │              synthesis_agent                         │   │
-│   │  reads {cypher_results} {semantic_results}           │   │
-│   │         {web_results} from session state             │   │
-│   │  outputs: ANSWER / CONFIDENCE / SOURCES /            │   │
-│   │           REASONING / NEEDS_REVIEW / NEW_EDGE        │   │
-│   └──────────────────────────────────────────────────────┘   │
-└───────────────┬──────────────────────────────────────────────┘
-                │
-┌───────────────▼──────────────────────────────────────────────┐
-│                  Safety & HITL layer                         │
-│  Gemini-as-Judge (before_model_callback)                     │
-│    → blocks personal medical advice                          │
-│    → scores faithfulness / hallucination / relevance         │
-│  HITL: confidence < 0.70 → WebSocket push → human decision   │
-│  HITL: NEW_EDGE → /approve-edge → write_approved_edge()      │
-└──────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    UI["React UI\n3D force graph · HITL review panel"]
+    API["FastAPI\n/query/stream SSE · /ws WebSocket · /approve-edge · /feedback"]
+    ORCH["SequentialAgent — orchestrator"]
+
+    subgraph PAR["ParallelAgent (concurrent)"]
+        CA["cypher_agent\n14 Cypher tools\noutput_key: cypher_results"]
+        SA["semantic_agent\nBM25 → Semantic → CrossEncoder\noutput_key: semantic_results"]
+        WA["web_agent\nGoogle Search\noutput_key: web_results"]
+    end
+
+    SYN["synthesis_agent\nmerges 3 sources\nANSWER · CONFIDENCE · SOURCES\nREASONING · NEEDS_REVIEW · NEW_EDGE"]
+
+    subgraph SAFETY["Safety & HITL layer"]
+        GJ["Gemini-as-Judge\nblocks medical advice\nfaithfulness · hallucination · relevance"]
+        HITL["HITL gate\nconfidence &lt; 0.70 → WebSocket → human\nNEW_EDGE → /approve-edge → Neo4j write"]
+    end
+
+    NEO4J[("Neo4j AuraDB\nHetionet v1.0\n47K nodes · 388K edges\nvector index")]
+
+    UI -->|SSE + WebSocket| API
+    API -->|ADK Runner| ORCH
+    ORCH --> PAR
+    PAR --> SYN
+    SYN --> SAFETY
+    CA -->|Cypher read| NEO4J
+    SA -->|vector search| NEO4J
+    SAFETY -->|approved edge write| NEO4J
 ```
 
 ## Dataset
@@ -130,44 +143,14 @@ Run evals yourself: `uv run python eval/ragas_eval.py`
 | Ingestion | NCBI E-utilities + neo4j_for_adk + sentence-transformers |
 | Deploy | Docker + GitHub Actions → Cloud Run |
 
-## What Was Built and Why
+## Challenges Faced
 
-This project started from the question: *Can a knowledge graph + vector search + LLM produce more trustworthy biomedical answers than a plain RAG system?*
-
-The hypothesis: typed multi-hop graph traversal catches facts that vector similarity misses (e.g. "what genes are associated with diseases that Ibuprofen treats?" — a 3-hop query that requires following typed edges), while semantic search recovers facts when the user doesn't know the exact node name in the graph.
-
-Key design decisions:
-- **Graph + vector hybrid**: cypher_agent and semantic_agent run in parallel (ADK ParallelAgent), so neither blocks the other
-- **3-stage reranking**: BM25 → semantic cosine → CrossEncoder catches both keyword and semantic matches with progressive precision
-- **HITL at confidence < 0.70**: low-confidence answers go to a human before being returned, rather than silently degrading
-- **Gemini-as-Judge**: faithfulness scoring runs post-synthesis to catch hallucinated claims, especially important in the medical domain
-- **TREATS not TREATS_DtT**: Hetionet uses abbreviated relationship type names with direction codes (e.g. `TREATS_CtD` = Compound treats Disease). Getting this wrong silently returns zero results
-
-## Pain Points and Challenges
-
-**1. Hetionet naming is strict — wrong casing means zero results**
-
-Compounds are title-case (`"Ibuprofen"` not `"ibuprofen"`), diseases are lowercase (`"osteoarthritis"` not `"Osteoarthritis"`), genes are UPPERCASE (`"TNF"` not `"tnf"`). The cypher_agent instruction includes explicit naming rules, but the model still occasionally uses wrong casing, producing silent zero-result Cypher queries.
-
-**2. AuraDB Free 400K edge limit forced 5 relationship types out**
-
-Hetionet has 2.25M relationships across 24 types. AuraDB Free caps at 400K edges. The 5 most relationship-heavy types (`EXPRESSES`, `PARTICIPATES`, `REGULATES`, `UPREGULATES`, `DOWNREGULATES`) were excluded. This means gene expression queries return nothing — a constraint the agent has to communicate honestly.
-
-**3. Public Hetionet uses Bolt 3.0 — no `database=` param**
-
-The fallback public instance at `bolt://neo4j.het.io` runs Bolt Protocol 3.0. Passing `database="hetionet"` causes a connection error. Every Neo4j session in the codebase omits the `database=` param.
-
-**4. ADK CLI is broken on Windows — used Python ADK Runner instead**
-
-`adk web`, `adk run`, and `adk deploy` all fail on Windows in this environment. All local testing uses `uvicorn` + the Python ADK Runner directly (`Runner`, `InMemorySessionService`, `runner.run_async()`).
-
-**5. Gemini tool schema rejects complex types**
-
-Gemini's function calling schema rejects `dict[str, Any] | None` parameters (`additional_properties` not supported). All agent-facing tool functions use only simple types (`str`, `int`, `list`). Complex internal types stay internal.
-
-**6. asyncio.run() fails under uvicorn's event loop**
-
-MCP Toolbox initialization (which calls `asyncio.run()`) fails when called inside an already-running event loop (uvicorn). The workaround: detect the running loop at startup and fall back to direct neo4j_tools.py if Toolbox init fails.
+- **Hetionet naming is case-sensitive** — Compounds are title-case (`"Ibuprofen"`), diseases lowercase (`"osteoarthritis"`), genes UPPERCASE (`"TNF"`). Wrong casing returns zero results silently.
+- **AuraDB Free 400K edge cap** — Hetionet has 2.25M edges across 24 types. Had to drop 5 relationship types (`EXPRESSES`, `PARTICIPATES`, `REGULATES`, `UPREGULATES`, `DOWNREGULATES`) to fit. Gene expression queries return nothing as a result.
+- **Public Hetionet uses Bolt 3.0** — `bolt://neo4j.het.io` rejects the `database=` parameter entirely. Every session in the codebase omits it.
+- **ADK CLI doesn't work on Windows** — `adk web`, `adk run`, `adk deploy` all fail. Used `uvicorn` + the Python ADK Runner (`Runner`, `run_async()`) for all local testing.
+- **Gemini rejects complex tool schemas** — `dict[str, Any] | None` parameters fail with `additional_properties not supported`. All tool signatures use only `str`, `int`, `list`.
+- **`asyncio.run()` inside uvicorn** — MCP Toolbox init calls `asyncio.run()` which crashes inside an already-running event loop. Fallback to direct `neo4j_tools.py` when Toolbox init fails.
 
 ## Setup
 
