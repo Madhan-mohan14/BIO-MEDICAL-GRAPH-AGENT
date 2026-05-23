@@ -1,0 +1,17 @@
+google-adk>=1.0.0
+neo4j>=5.0.0
+python-dotenv>=1.0.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+toolbox-core>=0.1.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+# Phase 1 — data pipeline
+requests>=2.31.0
+tqdm>=4.66.0
+pandas>=2.0.0
+# Phase 3 — reranking
+rank-bm25>=0.2.2
+sentence-transformers>=3.0.0
+# Firestore feedback + long-term memory
+google-cloud-firestore>=2.16.0

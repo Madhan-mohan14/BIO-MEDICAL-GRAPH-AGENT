@@ -1,0 +1,87 @@
+name: Test + Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT }}
+  REGION: us-central1
+  SERVICE: hetionet-graphrag
+  IMAGE: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/hetionet/hetionet-graphrag
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv pip install --system -r requirements.txt
+
+      - name: Run tests
+        env:
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: uv run pytest tests/ -v
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          docker build -t $IMAGE .
+          docker push $IMAGE
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy $SERVICE \
+            --image $IMAGE \
+            --platform managed \
+            --region $REGION \
+            --allow-unauthenticated \
+            --memory 4Gi \
+            --cpu 2 \
+            --concurrency 10 \
+            --add-cloudsql-instances ${{ secrets.GCP_PROJECT }}:us-central1:hetionet-sessions \
+            --set-secrets \
+              "NEO4J_URI=NEO4J_URI:latest,\
+NEO4J_USERNAME=NEO4J_USERNAME:latest,\
+NEO4J_PASSWORD=NEO4J_PASSWORD:latest,\
+GOOGLE_API_KEY=GOOGLE_API_KEY:latest,\
+DATABASE_URL=DATABASE_URL:latest" \
+            --set-env-vars \
+              "GOOGLE_ADK_MODEL=gemini-2.0-flash,\
+GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT }},\
+GOOGLE_CLOUD_LOCATION=us-central1" \
+            --project $PROJECT_ID

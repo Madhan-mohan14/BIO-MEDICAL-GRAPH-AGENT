@@ -1,0 +1,160 @@
+sources:
+  hetionet:
+    kind: neo4j
+    uri: ${NEO4J_URI}
+    user: ${NEO4J_USERNAME}
+    password: ${NEO4J_PASSWORD}
+
+tools:
+  get_compound_diseases:
+    source: hetionet
+    description: >
+      Get all diseases treated or palliated by a compound.
+      Returns disease name and relationship type (TREATS or PALLIATES).
+    parameters:
+      - name: compound_name
+        type: string
+        description: "Exact compound name as in Hetionet (e.g. 'Ibuprofen', 'Metformin')"
+    statement: |
+      MATCH (c:Compound {name: $compound_name})-[r:TREATS|PALLIATES]-(d:Disease)
+      RETURN d.name AS disease, type(r) AS relationship
+      ORDER BY d.name
+
+  get_disease_compounds:
+    source: hetionet
+    description: >
+      Get all compounds that treat or palliate a disease.
+      Returns compound name, identifier, and relationship type.
+    parameters:
+      - name: disease_name
+        type: string
+        description: "Exact disease name in Hetionet lowercase (e.g. 'osteoarthritis', 'type 2 diabetes mellitus')"
+    statement: |
+      MATCH (c:Compound)-[r:TREATS|PALLIATES]-(d:Disease {name: $disease_name})
+      RETURN c.name AS compound, c.identifier AS identifier, type(r) AS relationship
+      ORDER BY c.name
+
+  get_gene_diseases:
+    source: hetionet
+    description: >
+      Get all diseases associated with a gene symbol.
+      Returns disease name and identifier.
+    parameters:
+      - name: gene_symbol
+        type: string
+        description: "Gene symbol in UPPERCASE (e.g. 'TNF', 'TP53', 'BRCA1')"
+    statement: |
+      MATCH (g:Gene {name: $gene_symbol})-[:ASSOCIATES]-(d:Disease)
+      RETURN d.name AS disease, d.identifier AS identifier
+      ORDER BY d.name
+
+  get_compound_side_effects:
+    source: hetionet
+    description: >
+      Get all side effects caused by a compound.
+    parameters:
+      - name: compound_name
+        type: string
+        description: "Exact compound name (e.g. 'Ibuprofen')"
+    statement: |
+      MATCH (c:Compound {name: $compound_name})-[:CAUSES]->(s:`Side Effect`)
+      RETURN s.name AS side_effect, s.identifier AS identifier
+      ORDER BY s.name
+
+  get_disease_symptoms:
+    source: hetionet
+    description: >
+      Get all symptoms presented by a disease.
+    parameters:
+      - name: disease_name
+        type: string
+        description: "Exact disease name in lowercase"
+    statement: |
+      MATCH (d:Disease {name: $disease_name})-[:PRESENTS]->(s:Symptom)
+      RETURN s.name AS symptom
+      ORDER BY s.name
+
+  get_gene_compounds:
+    source: hetionet
+    description: >
+      Get all compounds that bind to a gene (drug targets).
+    parameters:
+      - name: gene_symbol
+        type: string
+        description: "Gene symbol in UPPERCASE (e.g. 'TNF')"
+    statement: |
+      MATCH (c:Compound)-[:BINDS]-(g:Gene {name: $gene_symbol})
+      RETURN c.name AS compound, c.identifier AS identifier
+      ORDER BY c.name
+
+  get_disease_anatomy:
+    source: hetionet
+    description: >
+      Get anatomical locations associated with a disease.
+    parameters:
+      - name: disease_name
+        type: string
+        description: "Exact disease name in lowercase"
+    statement: |
+      MATCH (d:Disease {name: $disease_name})-[:LOCALIZES]->(a:Anatomy)
+      RETURN a.name AS anatomy, a.identifier AS identifier
+      ORDER BY a.name
+
+  get_similar_diseases:
+    source: hetionet
+    description: >
+      Get diseases similar to a given disease (RESEMBLES relationship).
+    parameters:
+      - name: disease_name
+        type: string
+        description: "Exact disease name in lowercase"
+    statement: |
+      MATCH (d:Disease {name: $disease_name})-[:RESEMBLES]-(d2:Disease)
+      RETURN d2.name AS similar_disease, d2.identifier AS identifier
+      ORDER BY d2.name
+
+  get_drug_repurposing_candidates:
+    source: hetionet
+    description: >
+      Find drug repurposing candidates: compounds that bind genes associated
+      with a disease but do not already treat that disease.
+    parameters:
+      - name: disease_name
+        type: string
+        description: "Exact disease name in lowercase"
+    statement: |
+      MATCH (c:Compound)-[:BINDS]-(g:Gene)-[:ASSOCIATES]-(d:Disease {name: $disease_name})
+      WHERE NOT (c)-[:TREATS|PALLIATES]-(d)
+      RETURN DISTINCT c.name AS compound, c.identifier AS identifier,
+             count(g) AS gene_targets
+      ORDER BY gene_targets DESC
+      LIMIT 20
+
+  get_gene_pathways:
+    source: hetionet
+    description: >
+      Get biological pathways that include a gene.
+    parameters:
+      - name: gene_symbol
+        type: string
+        description: "Gene symbol in UPPERCASE"
+    statement: |
+      MATCH (p:Pathway)-[:INCLUDES]-(g:Gene {name: $gene_symbol})
+      RETURN p.name AS pathway, p.identifier AS identifier
+      ORDER BY p.name
+      LIMIT 30
+
+  get_schema_node_types:
+    source: hetionet
+    description: Return all node label types in the Hetionet graph.
+    parameters: []
+    statement: |
+      CALL db.labels() YIELD label RETURN label ORDER BY label
+
+  get_schema_relationship_types:
+    source: hetionet
+    description: Return all relationship types in the Hetionet graph.
+    parameters: []
+    statement: |
+      CALL db.relationshipTypes() YIELD relationshipType
+      RETURN relationshipType ORDER BY relationshipType
